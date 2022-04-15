@@ -15,4 +15,4 @@ Here is my cat, Luna. She enjoys chasing people up and down the stairs.
 
 ### Contact me
 
-[ruiwenbai@ucla.edu](mailto:ruiwenbai@ucla.edu)
+Keepin' it private for now.
