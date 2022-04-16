@@ -11,3 +11,5 @@ package.json
 .jekyll-cache*
 .ruby-version
 .ipynb_checkpoints/
+ipynb notebooks/temps.db
+ipynb notebooks/temps_stacked.csv
