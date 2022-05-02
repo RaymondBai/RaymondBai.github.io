@@ -11,7 +11,7 @@ I like to play tennis and badminton. I also enjoy watching stand-up comedy on Ne
 
 Here is my cat, Luna. She enjoys chasing people up and down the stairs.
 
-![](/images/luna.jpg){:height="300px"}
+![](~/Desktop/PIC16B/RaymondBai.github.io/images/luna.jpg){:height="300px"}
 
 ### Contact me
 
