@@ -3,34 +3,52 @@ layout: post
 title: SCOTUS Opinion Project
 ---
 
-Today we will discuss how we automated the scraping, cleaning, and OCR recognition of Supre Court Opinions, before using NLP to study sentiment.
+Today we will discuss how we automated the scraping, cleaning, and OCR recognition of Supre Court Opinions, before using NLP to study sentiment. You can find our work at  [SCOTUS Project Repo]("https://github.com/RaymondBai/PIC16B-Project").
 
 # Overview
 
 For our project, we conducted a sentiment analysis on the opinions of Supreme Court Justices with the aim to differentiate and highlight the unique "legal writing styles" of the Justices, which is beneficial for people learning about legal writing and may reveal Justices' legal philosophy. Our methodology included downloading large volumes of Supreme Court opinion PDFs from the official website. Then, we used OCR tools to detect and store the text before using regular expressions to separate the opinions and identify the author in order to construct our official dataset CSV. After preparing the data, we utilized NLP packages and tensorflow in order to find high prevalence words for each opinion type and author, as well as score the overall sentiment in the opinion. Once we created our models for both type and author classification based on the text, we tested these models on completely unseen data from the past 2 months. After examining our results, which were poor on the unseen data, we attempted to recreate our models after removing the justices from the training set who were not seen in the test set. As a result, our results seemed to improve.
 
-Here is the link to our Github repository: [](https://github.com/RaymondBai/PIC16B-Project)
 
-![](/images/flowchart.png)
+<img src="/images/flowchart.png" 
+        alt="Picture" 
+        width="750" 
+        height="60" 
+        style="display: block; margin: 0 auto" />
 
-## Getting the Data
+# Getting the Data
 
+In this project, we worked with the [Slip Opinions](https://www.supremecourt.gov/opinions/slipopinion) in the past eight years (2014-2021) posted on the official Supreme Court website.
 
+# Web scraping
 
+We began by scraping the Supreme Court Opinions Directory which contained pdf links of the Supreme Court opinions from 2021 to 2014. To create the scraper, we made a parse method that used the relevant css selectors and tags to acquire the opinion PDF links for each month of the year. Next we utilized a for loop to index through the list of PDF links and download the PDFs. A second parse method was created to go to the website links of each year and scrape and continue this process of downloading the PDFs. 
+
+![](/images/scrape.png)
+
+In the settings file, we specified “pdf” to be the document format to save the files as. A download delay was also implemented. Without this, multiple threads will try to write to the csv file at the same time. This will produce a file lock error in the command prompt and no downloads. You may find a more detailed scrapy instruction from my old blog here: [Movie Scrapy Project](https://raymondbai.github.io/RBai_HW2/)
 
 # Key Imports
+
 ```python
-import numpy as np # numeric manipulation
-import pandas as pd # data frame manipulation
-import tensorflow as tf # machine learning
-import re # regular expression
-import string # string manipulation
-from tensorflow import keras # machine learning
-from tensorflow.keras import layers # learning layers
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import re
+import string
+import matplotlib.pyplot as plt
+
+from tensorflow.keras import layers
+from tensorflow.keras import losses
+
 from tensorflow.keras.layers.experimental.preprocessing import TextVectorization
-from tensorflow.keras import utils # model diagram
-from tensorflow.keras import losses # loss function
-from sklearn.feature_extraction import text
+from tensorflow.keras.layers.experimental.preprocessing import StringLookup
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+
+from sklearn.decomposition import PCA
+import plotly.express as px 
 ```
 
 # Getting Data
