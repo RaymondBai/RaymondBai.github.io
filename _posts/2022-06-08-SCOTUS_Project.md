@@ -28,6 +28,42 @@ We began by scraping the Supreme Court Opinions Directory which contained pdf li
 
 In the settings file, we specified “pdf” to be the document format to save the files as. A download delay was also implemented. Without this, multiple threads will try to write to the csv file at the same time. This will produce a file lock error in the command prompt and no downloads. You may find a more detailed scrapy instruction from my old blog here: [Movie Scrapy Project](https://raymondbai.github.io/RBai_HW2/)
 
+Here is the key spider .py file, which you will need along with 
+
+```python
+import scrapy
+from pic16bproject.items import Pic16BprojectItem
+
+class courtscraper(scrapy.Spider):
+    name = 'court_spider'
+    
+    start_urls = ['https://www.supremecourt.gov/opinions/slipopinion/20']
+
+    def parse_start_url(self, response):
+        
+        return self.parse(response)
+
+    def parse(self, response):
+        #months = response.css("div#accordion a")
+        cases = response.css("td a")
+        pdfs = [a.attrib["href"] for a in cases] 
+        prefix = "https://www.supremecourt.gov"
+        pdfs_urls = [prefix + suffix for suffix in pdfs]
+
+        yield {
+            "links": pdfs_urls
+        }
+
+        for url in pdfs_urls:
+            item = Pic16BprojectItem() #define it items.py
+            item['file_urls'] = [url]
+            yield item
+
+    def next_parse(self, response):
+        next_page = response.css('div.col-md-12 a::attr(href)').extract() #do i need [0]^M
+        yield scrapy.Request(next_page, callback=self.next_parse)
+```
+
 # Key Imports
 
 ```python
@@ -51,281 +87,172 @@ from sklearn.decomposition import PCA
 import plotly.express as px 
 ```
 
-# Getting Data
+# OCR Text Recognition and Cleaning
+
+Wow here is a long chunk of code. I will explain below what it does precisely:
+
+After you have downloaded the opinion PDFs from the website using the scrapy spider, we will do the following:
+- For each opinion, convert pages into jpg files
+- Use OCR package to recognize the letters in the images and turn them into paragraphs of text
+- There is a significant chunk of regular expression in the middle that cleans the text, omits nonrelevant pages, and gets rid of filler headers, syllabus pages, appendix etc
+- Finally check if the resulting text fits a certain ***-delimited format designed to be read into a pd.DataFrame. If it does, append the opinion info (Author, Text, Opinion Type) into the designated pandas data frame (which we will use for the remainder of the project). If the format does not match (special reports), we omit them in the data set; please see below for details on this.
+- If an opinion is successful read into the data frame, the PDF will be automatically deleted. If not, a message will be shown and the user can manually check out both the raw PDF and the converted txt file to identify the problem.
 
 ```python
-train_url = "https://github.com/PhilChodrow/PIC16b/blob/master/datasets/fake_news_train.csv?raw=true"
-# Drop unnecessary column
-data = pd.read_csv(train_url)[["title", "text", "fake"]]
+# For every opinion PDF (downloaded from spider)
+for op in [i for i in os.listdir("./opinion_PDFs") if i[-3:] == 'pdf']:
+    
+    # *** Part 1 ***
+    pages = convert_from_path("./opinion_PDFs/" + op, dpi = 300)
+    image_counter = 1
+    # Iterate through all the pages in this opinion and store as jpg
+    for page in pages:
+        # Declaring filename for each page of PDF as JPG
+        # For each page, filename will be:
+        # PDF page 1 -> page_1.jpg
+        # ....
+        # PDF page n -> page_n.jpg
+        filename = "page_"+str(image_counter)+".jpg"
+        # Save the image of the page in system
+        page.save(filename, 'JPEG')
+        # Increment the counter to update filename
+        image_counter = image_counter + 1
+    image_counter = image_counter - 1
+    
+    # *** Part 2 ***
+    # Creating a text file to write the output
+    outfile = "./opinion_txt/" + op.split(".")[0] + "_OCR.txt"
+    # Open the file in append mode
+    f = open(outfile, "w")
+    
+    # Iterate from 1 to total number of pages
+    skipped_pages = []
+    print("Starting OCR for " + re.findall('([0-9a-z-]+)_', op)[0])
+    print("Reading page:")
+    for i in range(1, image_counter + 1):
+        print(str(i) + "...") if i==1 or i%10==0 or i==image_counter else None
+        # Set filename to recognize text from
+        filename = "page_" + str(i) + ".jpg"
+        # Recognize the text as string in image using pytesserct
+        text = pytesseract.image_to_string(Image.open(filename))
+        # If the page is a syllabus page or not an opinion page
+        # marked by "Opinion of the Court" or "Last_Name, J. dissenting/concurring"
+        # skip and remove this file; no need to append text
+        is_syllabus = re.search('Syllabus\n', text) is not None
+        is_maj_op = re.search('Opinion of [A-Za-z., ]+\n', text) is not None
+        is_dissent_concur_op = re.search('[A-Z]+, (C. )?J., (concurring|dissenting)?( in judgment)?', text) is not None
+        if is_syllabus or ((not is_maj_op) and (not is_dissent_concur_op)):
+            # note down the page was skipped, remove image, and move on to next page
+            skipped_pages.append(i)
+            os.remove(filename)
+            continue
+        # Restore sentences
+        text = text.replace('-\n', '')
+        # Roman numerals header
+        text = re.sub('[\n]+[A-Za-z]{1,4}\n', '', text)
+        # Remove headers
+        text = re.sub("[\n]+SUPREME COURT OF THE UNITED STATES[\nA-Za-z0-9!'#%&()*+,-.\/\[\]:;<=>?@^_{|}~—’ ]+\[[A-Z][a-z]+ [0-9]+, [0-9]+\][\n]+",
+                  ' ', text)
+        text = re.sub('[^\n]((CHIEF )?JUSTICE ([A-Z]+)[-A-Za-z0-9 ,—\n]+)\.[* ]?[\n]{2}',
+                  '!OP START!\\3!!!\\1!!!', text)
+        text = re.sub('[\n]+', ' ', text) # Get rid of new lines and paragraphs
+        text = re.sub('NOTICE: This opinion is subject to formal revision before publication in the preliminary print of the United States Reports. Readers are requested to noti[f]?y the Reporter of Decisions, Supreme Court of the United States, Washington, D.[ ]?C. [0-9]{5}, of any typographical or other formal errors, in order that corrections may be made before the preliminary print goes to press[\.]?',
+                      '', text)
+        text = re.sub('Cite as: [0-9]+[ ]?U.S.[_]* \([0-9]+\) ([0-9a-z ]+)?(Opinion of the Court )?([A-Z]+,( C.)? J., [a-z]+[ ]?)?',
+                      '', text)
+        text = re.sub(' JUSTICE [A-Z]+ took no part in the consideration or decision of this case[\.]?', '', text)
+        text = re.sub('[0-9]+ [A-Z!&\'(),-.:; ]+ v. [A-Z!&\'(),-.:; ]+ (Opinion of the Court )?(dissenting[ ]?|concurring[ ]?)?',
+                  '', text)
+        # Remove * boundaries
+        text = re.sub('([*][ ]?)+', '', text)
+        # Eliminate "It is so ordered" after every majority opinion
+        text = re.sub(' It is so ordered\. ', '', text)
+        # Eliminate opinion header
+        text = re.sub('Opinion of [A-Z]+, [C. ]?J[\.]?', '', text)
+        # Separate opinions
+        text = re.sub('!OP START!', '\n', text)
+    
+        # Write to text
+        f.write(text)
+    
+        # After everything is done for the page, remove the page image
+        os.remove(filename)
+    # Close connection to .txt file after finishing writing
+    f.close()
+    
+    # Now read in the newly created txt file as a pandas data frame if possible
+    
+    try:
+        op_df = pd.read_csv("./opinion_txt/" + op.split(".")[0] + "_OCR.txt",
+                            sep = re.escape("!!!"), engine = "python",
+                            names = ["Author", "Header", "Text"])
+        op_df.insert(1, "Docket_Number", re.findall("([-a-z0-9 ]+)_", op)[0])
+        op_df["Type"] = op_df.Header.apply(opinion_classifier)
+        
+        # Lastly add all the opinion info to the main data frame
+        opinion_df = opinion_df.append(op_df, ignore_index = True)
+        os.remove("./opinion_PDFs/" + op)
+        print("Task completed\nPages skipped: " + str(skipped_pages) + "\n")
+    except:
+        print("Error in CSV conversion. Pages NOT added!\n")
+        
+print("-----------------------\nAll assigned OCR Completed")
 ```
 
-## Create Data Set
+# Type and Author Classification
 
-We create a function that takes in a data frame and returns a `Dataset` object with no stop word and no puncuation.
-```python
-def make_dataset(df):
-  # Remove stop words from text and title
-  stop = text.ENGLISH_STOP_WORDS
-  data["text"] = data["text"].apply(lambda x: ' '.join([word for word in x.split() if word not in (stop)]))
-  # Construct and return a tf.data.Dataset
-  # with two inputs and one output
-  dataset = tf.data.Dataset.from_tensor_slices(
-      # tuple for input
-      ( # dictionary for input data/features
-       { "title": data[["title"]],
-         "text": data["text"]},
-       # dictionary for output data/labels
-       { "is_fake": data[["fake"]]}   
-      )
-  )
-  return dataset
-```
-
-### Create and Batch the `Dataset`
-
-```python
-# Batch the Dataset to increase training speed
-dataset = make_dataset(data).batch(100)
-```
-
-### Train/Validation Split
-```python
-# First shuffle to eliminate any trend
-dataset = dataset.shuffle(buffer_size = len(dataset))
-
-# 20% for validation
-train_size = int(0.8*len(dataset))
-val_size   = int(0.2*len(dataset))
-
-train = dataset.take(train_size)
-val = dataset.skip(train_size).take(val_size)
-```
-
-### Understanding Base Rate
-```python
-train_labels = np.empty(0)
-for inputs, fake in train:
-  train_labels = np.append(train_labels, ([j[0] for j in fake["is_fake"].numpy()]))
-
-train_labels.mean()
-```
-The "base rate" is about 52%. That is, if we simply classify every news in the training data set as fake news (is_fake = 1), then our accuracy would be 52%.
-
-### Text Vectorization
-```python
-# We only keep the top 2000 ranked words (by appearance frequency)
-size_vocabulary = 2000
-
-# Function that eliminates any remaining punctuations in the text
-def standardization(input_data):
-    no_punctuation = tf.strings.regex_replace(input_data,
-                                              '[%s]' % re.escape(string.punctuation),'')
-    return no_punctuation 
-
-title_vectorize_layer = TextVectorization(
-    standardize = standardization,
-    max_tokens = size_vocabulary,
-    output_mode = 'int',
-    output_sequence_length = 500)
-
-text_vectorize_layer = TextVectorization(
-    standardize = standardization,
-    max_tokens = size_vocabulary,
-    output_mode = 'int',
-    output_sequence_length = 500)
-
-# Let the layers "learn" from the titles/text
-# from the training data set
-title_vectorize_layer.adapt(train.map(lambda x, y: x["title"]))
-text_vectorize_layer.adapt(train.map(lambda x, y: x["text"]))
-```
-
-## Create Models
-
-### Model 1 - Using only Article Titles
-
-```python
-# Specify our Title input
-title_input = keras.Input(
-    shape=(1,),
-    name = "title", # SAME name as the dictionary key in the dataset
-    dtype = "string"
-)
-
-# Specify the layers in our model
-title_features = title_vectorize_layer(title_input)
-title_features = layers.Embedding(input_dim = size_vocabulary,
-                                  output_dim = 2,
-                                  name="embedding")(title_features)
-title_features = layers.Dropout(0.2)(title_features)
-title_features = layers.GlobalAveragePooling1D()(title_features)
-title_features = layers.Dropout(0.2)(title_features)
-title_features = layers.Dense(32, activation = 'relu')(title_features)
-title_output = layers.Dense(2, activation = 'relu', name = "is_fake")(title_features)
-
-title_model = keras.Model(
-    inputs = title_input,
-    outputs = title_output
-)
-```
-
-Here is the model structure:
-```python
-model = keras.Model(
-    inputs = [title_input, text_input],
-    outputs = main
-)
-keras.utils.plot_model(model)
-```
-
-![](/images/title_only_model_struct.png)
-
-
-Here is the progression of training and validation accuracy. Very impressive!
-
-![](/images/title_only_model_learn.png)
-
-### Model 2 - Using only Article Text
+We used tensorflow in order to classify all of the opinion types and justices, labeled as authors, based on the text alone. To do this, we created two data frames: one with type and text as the columns, and another with author and text as the columns. Then, we converted each type and column into integer labels using a label encoder in order to move forward with our classification task. We split our data into 70% training, 10% validation, and 20% testing in order to train our models and compare our resulting accuracies,. Both the type and author models implemented a sequential model that used an embedding layer, two dropout layers, a 1D global average pooling layer, and a dense layer. The dimensions for the output and dense layer were altered based on the total number of opinion types (4) and total number of authors (12). The code for all these tasks together look like this
 
 ```python
-# Specify our Title input
-text_input = keras.Input(
-    shape=(1,),
-    name = "text", # SAME name as the dictionary key in the dataset
-    dtype = "string"
-)
+le = LabelEncoder()
+train_lmt["Type"] = le.fit_transform(train_lmt["Type"])
 
-# Specify the layers in our model
-text_features = text_vectorize_layer(text_input)
-text_features = layers.Embedding(input_dim = size_vocabulary,
-                                 output_dim = 2,
-                                 name="embedding")(text_features)
-text_features = layers.Dropout(0.2)(text_features)
-text_features = layers.GlobalAveragePooling1D()(text_features)
-text_features = layers.Dropout(0.2)(text_features)
-text_features = layers.Dense(32, activation = 'relu')(text_features)
-text_output = layers.Dense(2, activation = 'relu', name = "is_fake")(text_features)
+type_df = train_lmt.drop(["Author"], axis = 1)
+type_df
 
-text_model = keras.Model(
-    inputs = text_input,
-    outputs = text_output
-)
+type_train_df = tf.data.Dataset.from_tensor_slices((train_lmt["Text"], train_lmt["Type"]))
+
+type_train_df = type_train_df.shuffle(buffer_size = len(type_train_df))
+
+# Split data into 70% train, 10% validation, 20% test
+train_size = int(0.7*len(type_train_df)) 
+val_size = int(0.1*len(type_train_df))
+
+type_train = type_train_df.take(train_size) 
+type_val = type_train_df.skip(train_size).take(val_size)
+type_test = type_train_df.skip(train_size + val_size)
+
+opinion_type = type_train.map(lambda x, y: x)
+vectorize_layer.adapt(opinion_type)
+
+train_vec = type_train.map(vectorize_pred)
+val_vec = type_val.map(vectorize_pred)
+test_vec = type_test.map(vectorize_pred)
+
+type_model.compile(loss = losses.SparseCategoricalCrossentropy(from_logits = True),
+                   optimizer = "adam", 
+                   metrics = ["accuracy"])
+
+type_model.summary()
 ```
 
-Here is the model structure:
-```python
-model = keras.Model(
-    inputs = [title_input, text_input],
-    outputs = main
-)
-keras.utils.plot_model(model)
-```
+We experienced great success with the training and validation accuracies for both models. For the type model, the training accuracies hovered around 92% and the validation accuracies settled around 99% as the later epochs were completed. 
 
-![](/images/text_struct.png)
+![](/images/SCOTUS_model1.png)
 
+There is also an interesting phenomenon in the PCA analysis of the key words. If you hover over the points in the bottom center of the cluster, you will see "dissent" at the very bottom by itself, but almost right above it is "chief" (justice) and "scalia" is at around (0.83, -2.0). It is certainly interesting to see these three closely related, as Justice Scalia is known for his scathing dissents and the Chief Justice has certainly written a fair share of dissents during the past 7 years on the court (a majority of them when the court leaned liberal)
 
-Here is the progression of training and validation accuracy.
+{% include SCOTUS_PCA.html%}
 
-![](/images/text_only_model_learn.png)
+For the author model, the training accuracies hovered around 87% and the validation accuracies settled around 97% as the later epochs were completed. Further, we did not worry too much about overfitting as there was a large amount of overlap between training and validation accuracies and there was never too much of a dropoff between the two. After training our models, we evaluated them on the testing set which was the random 20% of the original data. Once again, experienced great success as the type and author test accuracies were ~99.5% and ~95.6%, respectively. Thus, our models performed very well on the original dataset.
 
-### Model 3 - Using both Article Title and Text
+![](/images/SCOTUS_model2.png)
 
-```python
-title_features = title_vectorize_layer(title_input)
-#title_features = layers.Dropout(0.2)(title_features)
-#title_features = layers.Dense(32, activation = 'relu')(title_features)
+However, we also created an additional testing set that included unseen data from the past two months alone. This is where our models seemed to falter. Specifically, our type model testing accuracy was ~28.1% and our author model testing accuracy was ~3.1%. These are clearly much lower than the testing accuracies from our initial data. Thus, we performed further evaluation of our datasets and noticed some variations. Specifically, the unseen test set which has all the data from the last two months, consisted of fewer authors than our original data. So, we removed the justices from the original dataset who were not seen in the data from the last two months and retrained and tested our models once again. Similar to the first time, the training and validation accuracies were very high. However, we did notice a slight increase in our testing accuracies as the type model improved to ~34.4% and our author model improved to ~15.6%. Although these are still rather low, we believe that further inspection into our test dataset would provide us with more clarity about potential improvements that we could make to our model so that it performs better with the testing data.
 
-text_features = text_vectorize_layer(text_input)
-#text_features = layers.Dropout(0.2)(text_features)
-#text_features = layers.Dense(32, activation = 'relu')(text_features)
+# Conclusion
 
-# Concatenate the two sets of layers that we used before
-main = layers.concatenate([title_features, text_features], axis = 1)
-main = layers.Embedding(input_dim = size_vocabulary * 2,
-                        output_dim = 2,
-                        name="embedding")(main)
-main = layers.Dense(32, activation = 'relu')(main)
-main = layers.GlobalAveragePooling1D()(main)
-main = layers.Dropout(0.2)(main)
-main = layers.Dense(64, activation = 'relu')(main)
-# Append the final dense layer for classification
-main = layers.Dense(2, name = "is_fake")(main)
-)
-```
-
-Here is the model structure:
-```python
-model = keras.Model(
-    inputs = [title_input, text_input],
-    outputs = main
-)
-keras.utils.plot_model(model)
-```
-
-![](/images/both_model_struct.png)
-
-
-Here is the progression of training and validation accuracy.
-
-![](/images/both_model_learn.png)
-
-**The model using both titles and texts achieved the best best validation score of about 0.9975.**
-
-## Model Evaluation
-
-```python
-# Test data
-test_url = "https://github.com/PhilChodrow/PIC16b/blob/master/datasets/fake_news_test.csv?raw=true"
-test = pd.read_csv(test_url, index_col = 0)
-
-# Convert to dataset
-test_set = make_dataset(test_data)
-type(test_set)
-
-# Evaluate our model's performance
-model.evaluate(test_set)
-```
-
-The final test accuracy is around 0.76, which is lower than what we would have liked (and lower than that of our validation data set), but this makes sense since the test accuracy may ocntain data or insight not present in our entire training (and validation) data, thus we should expect some decrease in general prediction power.
-
-## Word Embedding
-
-```python
-# get the weights from the embedding layer
-weights = model.get_layer('embedding').get_weights()[0] 
-# get the vocabulary from our data prep for later
-vocab = title_vectorize_layer.get_vocabulary() + text_vectorize_layer.get_vocabulary()
-
-# Dimension reduce to 2D
-from sklearn.decomposition import PCA
-pca = PCA(n_components=2)
-weights = pca.fit_transform(weights)
-
-# Loadings in df
-embedding_df = pd.DataFrame({
-    'word' : vocab, 
-    'x0'   : weights[:,0],
-    'x1'   : weights[:,1]
-})
-```
-
-```python
-import plotly.express as px 
-fig = px.scatter(embedding_df, 
-                 x = "x0", 
-                 y = "x1", 
-                 size = [2]*len(embedding_df),
-                # size_max = 2,
-                 hover_name = "word")
-
-fig.show()
-write_html(fig, "fake_news_pca.html")
-```
-
-{% include fake_news_pca.html%}
-
-I am absolutely shocked that the pca turned out so "clean" in that there are two distinct directions (it seems almost too good to be true). We observe that there are several interesting words:
-- The two left-most words are "POLL"" and "TRUMP'S", potentially referencing to headlines regarding former President Trump's comment on issues or commenting on the ongoing election process (or post-election chaos). These words seem to indicate that the news article is "fake news".
-- The two right-most words are "agree"" and "expects", which are two objective words that do not carry any connotation. They are most likely used in real news headlines that address world events or discussions between political leaders.
-- "Race", "Voters", and "Inauguration" are three of the many words that are in the center. They do not immediately give us insight whether the news articles are "fake news"" or not, whih makes sense since these words, when put into different context, can most definitely create credible and rational news reporting or fanatic and attention-grabbing opinion pieces.
-
+I personally am very happy with this project and how much we were able to accomplish. I certainly am still in awe of the ability of scrapy spiders and quite proud of all the regular expression finetuning that I did which allowed the OCR and text cleaning to work properly. There are certainly manu areas of potential improvements
+- The regular expression can be more precise. Currently pytesseract is unable to distinguish footnote properly, so some of that bleeds into the main paragraphs while scanning
+- With more time, we'd like to explore more why the model worked well in the 20% set aside as "test data" from the main data frame, but did signifcantly worse in the true test data (recent opinions released in the past two months)
+- We explored with some sentiment analysis - such as using existing word bank AFINN to label the positivity/negativity of each word. The results were not very interesting and was omitted (opinions scored lower, or were perceived as more negative, compared to others even dissent; all justices on average had negative tones). We can return to this later and use other methods to explore.
